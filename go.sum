@@ -1,0 +1,4 @@
+github.com/mcstatus-io/mcutil/v4 v4.3.1 h1:OvuZfl8p4R2xUv7GuC8cF1UnxaePUFGA40NjC2JDGBk=
+github.com/mcstatus-io/mcutil/v4 v4.3.1/go.mod h1:PGyTrx9UNvWVDHxbYQT89es9AWPkv5pAc6BAlFHm4fU=
+github.com/woozymasta/a2s v0.4.0 h1:TcCifIOaKzqJT7upyw7YsR8FV0rzWIEAZTq1EhysT6Q=
+github.com/woozymasta/a2s v0.4.0/go.mod h1:ouI06EvIENzEgQJIXIYnvuSK7/IdqXXImAX6ZgNU8fI=
