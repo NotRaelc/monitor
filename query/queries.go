@@ -4,151 +4,61 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
-	"net/netip"
-	"strconv"
 	"time"
 
-	"github.com/mcstatus-io/mcutil/v4/response"
 	"github.com/mcstatus-io/mcutil/v4/status"
 	"github.com/woozymasta/a2s/pkg/a2s"
 )
 
-type Server struct {
-	Name          string         `json:"name"`
-	Icon          string         `json:"icon"`
-	Map           string         `json:"map"`
-	Game          string         `json:"app_id"`
-	Players       []ServerPlayer `json:"players"`
-	Protocol      int64          `json:"protocol"`
-	OnlinePlayers int64          `json:"online_players"`
-	MaxPlayers    int64          `json:"max_players"`
-}
-
-type ServerPlayer struct {
-	Name  string `json:"name"`
-	Index string `json:"index"`
-}
-
-func serverFromMinecraft(resp response.StatusModern) Server {
-	s := Server{
-		Name:     resp.Version.Name.Clean,
-		Map:      "Minecraft",
-		Game:     "Minecraft",
-		Protocol: resp.Version.Protocol,
-	}
-	if resp.Favicon != nil {
-		s.Icon = *resp.Favicon
-	}
-	if resp.Players.Online != nil {
-		s.OnlinePlayers = *resp.Players.Online
-	}
-	if resp.Players.Max != nil {
-		s.MaxPlayers = *resp.Players.Max
-	}
-	s.Players = make([]ServerPlayer, 0, len(resp.Players.Sample))
-	for _, p := range resp.Players.Sample {
-		s.Players = append(s.Players, ServerPlayer{Name: p.Name.Clean, Index: p.ID})
-	}
-	return s
-}
-
-func serverFromMinecraftOld(resp response.StatusLegacy) Server {
-	return Server{
-		Name:          resp.Version.Name.Clean,
-		Map:           "Minecraft",
-		Game:          "MinecraftOld",
-		Protocol:      resp.Version.Protocol,
-		OnlinePlayers: resp.Players.Online,
-		MaxPlayers:    resp.Players.Max,
-		Players:       []ServerPlayer{},
-	}
-}
-
-func serverFromSource(info a2s.Info, players []a2s.Player) Server {
-	s := Server{
-		Name:          info.Name,
-		Map:           info.Map,
-		Game:          strconv.FormatUint(uint64(info.AppID), 10),
-		Protocol:      int64(info.Protocol),
-		OnlinePlayers: int64(info.Players),
-		MaxPlayers:    int64(info.MaxPlayers),
-		Players:       make([]ServerPlayer, 0, len(players)),
-	}
-	for _, p := range players {
-		s.Players = append(s.Players, ServerPlayer{
-			Name:  p.Name,
-			Index: strconv.FormatUint(uint64(p.Index), 10),
-		})
-	}
-	return s
-}
-
-// splitHostPort разбирает "host:port". Если порт не указан — подставляет
-// DefaultMinecraftPort (25565), как это делает клиент Minecraft.
-func splitHostPort(s string) (string, uint16, error) {
-	host, portStr, err := net.SplitHostPort(s)
-	if err != nil {
-		var addrErr *net.AddrError
-		if errors.As(err, &addrErr) && addrErr.Err == "missing port in address" {
-			return s, DefaultMinecraftPort, nil
-		}
-		return "", 0, fmt.Errorf("invalid address %q: %w", s, err)
-	}
-	port, err := strconv.ParseUint(portStr, 10, 16)
-	if err != nil {
-		return "", 0, fmt.Errorf("invalid port %q: %w", portStr, err)
-	}
-	if port == 0 {
-		port = DefaultMinecraftPort
-	}
-	return host, uint16(port), nil
-}
-
-func resolveIPv4Pref(ctx context.Context, host string) (string, error) {
-	if addr, err := netip.ParseAddr(host); err == nil {
-		return addr.String(), nil
-	}
-	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-	if err != nil {
-		return "", fmt.Errorf("dns lookup failed for %q: %w", host, err)
-	}
-	if len(ips) == 0 {
-		return "", fmt.Errorf("no IP addresses for %q", host)
-	}
-	for _, ip := range ips {
-		if ip.Is4() {
-			return ip.String(), nil
-		}
-	}
-	return ips[0].String(), nil
-}
-
-// isDialError — true, если TCP-соединение не установилось вообще
-// (DNS, refused, dial timeout). false — коннект прошёл и удалённая
-// сторона что-то ответила (EOF, RST и т.п.).
-func isDialError(err error) bool {
-	var opErr *net.OpError
-	return errors.As(err, &opErr) && opErr.Op == "dial"
-}
-
-func queryMinecraft(ctx context.Context, host string, port uint16) (Server, error) {
+// queryMinecraftModern — одиночный Modern-запрос, одна ошибка, один коннект.
+func queryMinecraftModern(ctx context.Context, host string, port uint16) (Server, error) {
 	resp, err := status.Modern(ctx, host, port)
-	if err == nil {
-		return serverFromMinecraft(*resp), nil
-	}
-	if ctx.Err() != nil {
+	if err != nil {
 		return Server{}, fmt.Errorf("modern: %w", err)
 	}
+	return serverFromMinecraft(*resp), nil
+}
 
-	respLegacy, errLegacy := status.Legacy(ctx, host, port)
-	if errLegacy != nil {
-		return Server{}, errors.Join(
-			fmt.Errorf("modern: %w", err),
-			fmt.Errorf("legacy: %w", errLegacy),
-		)
+// queryMinecraftLegacy — одиночный Legacy-запрос, одна ошибка, один коннект.
+func queryMinecraftLegacy(ctx context.Context, host string, port uint16) (Server, error) {
+	resp, err := status.Legacy(ctx, host, port)
+	if err != nil {
+		return Server{}, fmt.Errorf("legacy: %w", err)
 	}
-	return serverFromMinecraftOld(*respLegacy), nil
+	return serverFromMinecraftOld(*resp), nil
+}
+
+// queryMinecraft — auto: Modern и Legacy параллельно, первый успех побеждает.
+// Проигравший глушится через cancel. Используется только в ServerAuto.
+func queryMinecraft(ctx context.Context, host string, port uint16) (Server, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type mcResult struct {
+		s   Server
+		err error
+	}
+	ch := make(chan mcResult, 2)
+
+	go func() {
+		s, err := queryMinecraftModern(ctx, host, port)
+		ch <- mcResult{s: s, err: err}
+	}()
+	go func() {
+		s, err := queryMinecraftLegacy(ctx, host, port)
+		ch <- mcResult{s: s, err: err}
+	}()
+
+	errs := make([]error, 0, 2)
+	for range 2 {
+		r := <-ch
+		if r.err == nil {
+			cancel()
+			return r.s, nil
+		}
+		errs = append(errs, r.err)
+	}
+	return Server{}, errors.Join(errs...)
 }
 
 func querySource(ctx context.Context, host string, port uint16) (Server, error) {
@@ -161,7 +71,9 @@ func querySource(ctx context.Context, host string, port uint16) (Server, error) 
 		return Server{}, err
 	}
 	defer client.Close()
-	defer context.AfterFunc(ctx, func() { client.Close() })()
+
+	stop := context.AfterFunc(ctx, func() { client.Close() })
+	defer stop()
 
 	info, err := client.GetInfo(ctx)
 	if err != nil {
@@ -174,18 +86,40 @@ func querySource(ctx context.Context, host string, port uint16) (Server, error) 
 	return serverFromSource(*info, players), nil
 }
 
-// QueryServer опрашивает Minecraft и Source параллельно, возвращает
-// первый успешный ответ. Если Minecraft установил TCP и получил ответ
-// (не dial-ошибка) — Source не дожидается: порт точно занят.
-func QueryServer(addrStr string, timeout time.Duration) (Server, error) {
+// QueryServer — точка входа.
+//
+// Без третьего аргумента (или с ServerAuto) работает в auto-режиме:
+// Minecraft (Modern|Legacy) и Source опрашиваются параллельно, побеждает
+// первый успех. Если Minecraft установил TCP и получил ответ — Source
+// не дожидается: порт точно занят.
+//
+// Предпочтительно использовать ServerType, чтобы anti-ddos не банил.
+// Я пока хз как разобраться с этой проблемой нормально, но поху...
+func QueryServer(addrStr string, timeout time.Duration, st ...ServerType) (Server, error) {
 	host, port, err := splitHostPort(addrStr)
 	if err != nil {
 		return Server{}, err
 	}
 
+	kind := ServerAuto
+	if len(st) > 0 {
+		kind = st[0]
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
+	// Явный тип — 1 коннект, никаких гонок и лишних сокетов.
+	switch kind {
+	case ServerSource:
+		return querySource(ctx, host, port)
+	case ServerMinecraftModern:
+		return queryMinecraftModern(ctx, host, port)
+	case ServerMinecraftLegacy:
+		return queryMinecraftLegacy(ctx, host, port)
+	}
+
+	// ServerAuto (или неизвестное значение) — параллельный перебор.
 	type result struct {
 		s   Server
 		err error
