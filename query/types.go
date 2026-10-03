@@ -34,6 +34,13 @@ type ServerPlayer struct {
 	Index string `json:"index"`
 }
 
+// modernGrace — сколько ждать Modern после того, как Legacy уже ответил.
+// Современные сервера обычно умеют отвечать и на legacy-ping (для
+// совместимости), но legacy-ответ приходит быстрее. Если принять первый
+// успех — современный сервер ошибочно классифицируется как legacy.
+// Ждём Modern ещё немного: успел — побеждает он, не успел — Legacy.
+const modernGrace = 200 * time.Millisecond
+
 const (
 	DefaultTimeout       = 5 * time.Second
 	DefaultMinecraftPort = 25565

@@ -28,32 +28,73 @@ func queryMinecraftLegacy(ctx context.Context, host string, port uint16) (Server
 	return serverFromMinecraftOld(*resp), nil
 }
 
-// queryMinecraft — Modern первым, Legacy только если Modern упал.
-// Modern всегда приоритетен: современные сервера обычно умеют отвечать
-// и на legacy-ping (для совместимости), и в параллельной гонке legacy
-// всегда выигрывает из-за короткого ответа — что даёт неверную
-// классификацию. Здесь этого не происходит.
+// queryMinecraft — Modern и Legacy параллельно. Modern приоритетен:
+// при его успехе возвращаемся мгновенно. Если первым ответил Legacy,
+// даём Modern modernGrace, чтобы он тоже успел — иначе на современных
+// серверах мы бы всегда получали legacy-классификацию.
 //
-// На dial-ошибке (DNS, refused, dial timeout) Legacy не запускается:
-// он использует тот же TCP-слой и упадёт так же. Если Modern завис на
-// legacy-сервере до конца ctx — Legacy тоже уже не успеет.
+// Грация ограничена дедлайном ctx, чтобы не выйти за общий timeout.
+// Обе неудачи схлопываются через errors.Join.
 func queryMinecraft(ctx context.Context, host string, port uint16) (Server, error) {
-	resp, err := status.Modern(ctx, host, port)
-	if err == nil {
-		return serverFromMinecraft(*resp), nil
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	type mcResult struct {
+		s        Server
+		err      error
+		isModern bool
 	}
-	if isDialError(err) || ctx.Err() != nil {
-		return Server{}, fmt.Errorf("modern: %w", err)
+	ch := make(chan mcResult, 2)
+
+	go func() {
+		s, err := queryMinecraftModern(ctx, host, port)
+		ch <- mcResult{s: s, err: err, isModern: true}
+	}()
+	go func() {
+		s, err := queryMinecraftLegacy(ctx, host, port)
+		ch <- mcResult{s: s, err: err, isModern: false}
+	}()
+
+	// Ждём первый результат.
+	first := <-ch
+
+	// Modern успешен — он приоритетен, отменяем Legacy и возвращаемся.
+	if first.isModern && first.err == nil {
+		cancel()
+		return first.s, nil
 	}
 
-	respLegacy, errLegacy := status.Legacy(ctx, host, port)
-	if errLegacy != nil {
-		return Server{}, errors.Join(
-			fmt.Errorf("modern: %w", err),
-			fmt.Errorf("legacy: %w", errLegacy),
-		)
+	// Legacy успешен первым — даём Modern шанс догнать.
+	if !first.isModern && first.err == nil {
+		grace := modernGrace
+		if dl, ok := ctx.Deadline(); ok {
+			if remain := time.Until(dl); remain < grace {
+				grace = remain
+			}
+		}
+		select {
+		case r := <-ch:
+			// Единственный возможный второй результат — Modern.
+			if r.err == nil {
+				cancel()
+				return r.s, nil
+			}
+			cancel()
+			return first.s, nil
+		case <-time.After(grace):
+			cancel()
+			return first.s, nil
+		}
 	}
-	return serverFromMinecraftOld(*respLegacy), nil
+
+	// Первый — ошибка. Ждём второй.
+	second := <-ch
+	if second.err == nil {
+		cancel()
+		return second.s, nil
+	}
+	cancel()
+	return Server{}, errors.Join(first.err, second.err)
 }
 
 func querySource(ctx context.Context, host string, port uint16) (Server, error) {
