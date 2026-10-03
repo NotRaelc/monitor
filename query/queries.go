@@ -28,37 +28,32 @@ func queryMinecraftLegacy(ctx context.Context, host string, port uint16) (Server
 	return serverFromMinecraftOld(*resp), nil
 }
 
-// queryMinecraft — auto: Modern и Legacy параллельно, первый успех побеждает.
-// Проигравший глушится через cancel. Используется только в ServerAuto.
+// queryMinecraft — Modern первым, Legacy только если Modern упал.
+// Modern всегда приоритетен: современные сервера обычно умеют отвечать
+// и на legacy-ping (для совместимости), и в параллельной гонке legacy
+// всегда выигрывает из-за короткого ответа — что даёт неверную
+// классификацию. Здесь этого не происходит.
+//
+// На dial-ошибке (DNS, refused, dial timeout) Legacy не запускается:
+// он использует тот же TCP-слой и упадёт так же. Если Modern завис на
+// legacy-сервере до конца ctx — Legacy тоже уже не успеет.
 func queryMinecraft(ctx context.Context, host string, port uint16) (Server, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	type mcResult struct {
-		s   Server
-		err error
+	resp, err := status.Modern(ctx, host, port)
+	if err == nil {
+		return serverFromMinecraft(*resp), nil
 	}
-	ch := make(chan mcResult, 2)
-
-	go func() {
-		s, err := queryMinecraftModern(ctx, host, port)
-		ch <- mcResult{s: s, err: err}
-	}()
-	go func() {
-		s, err := queryMinecraftLegacy(ctx, host, port)
-		ch <- mcResult{s: s, err: err}
-	}()
-
-	errs := make([]error, 0, 2)
-	for range 2 {
-		r := <-ch
-		if r.err == nil {
-			cancel()
-			return r.s, nil
-		}
-		errs = append(errs, r.err)
+	if isDialError(err) || ctx.Err() != nil {
+		return Server{}, fmt.Errorf("modern: %w", err)
 	}
-	return Server{}, errors.Join(errs...)
+
+	respLegacy, errLegacy := status.Legacy(ctx, host, port)
+	if errLegacy != nil {
+		return Server{}, errors.Join(
+			fmt.Errorf("modern: %w", err),
+			fmt.Errorf("legacy: %w", errLegacy),
+		)
+	}
+	return serverFromMinecraftOld(*respLegacy), nil
 }
 
 func querySource(ctx context.Context, host string, port uint16) (Server, error) {
