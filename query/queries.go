@@ -131,6 +131,8 @@ func querySource(ctx context.Context, host string, port uint16) (Server, error) 
 //
 // Предпочтительно использовать ServerType, чтобы anti-ddos не банил.
 // Я пока хз как разобраться с этой проблемой нормально, но поху...
+// TODO: Сделать систему, при которой нельзя опрашивать один
+// TODO: и тот же сервер быстрее, чем каждые N секунд.
 func QueryServer(addrStr string, timeout time.Duration, st ...ServerType) (Server, error) {
 	host, port, err := splitHostPort(addrStr)
 	if err != nil {
