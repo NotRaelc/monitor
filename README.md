@@ -8,6 +8,14 @@
 Билдите через `go build`, переходите на `localhost:8080/api/v1/{айпи сервера}?mode=0`
 
 `mode` ставится по желанию. По умолчанию будет `0 (Auto)`
+```go
+// Значения mode
+ServerAuto             = 0 // 0 — перебор всех (по умолчанию)
+ServerSource           = 1 // 1 — только A2S (Source/GoldSrc/etc.)
+ServerMinecraftModern  = 2 // 2 — только Minecraft 1.7+
+ServerMinecraftLegacy  = 3 // 3 — только Minecraft ≤1.6
+
+```
 
 > [!CAUTION]
 > ЕСЛИ ВЫ БУДЕТЕ ОЧЕНЬ ЧАСТО ОПРАШИВАТЬ __ЗАЩИЩЕННЫЕ СЕРВЕРА__ MINECRAFT (НАПРИМЕР, `mc.hypixel.net`) БЕЗ ПАРАМЕТРА `mode=2`, ТО ВАС **ЗАБАНЯТ ПО IP** ДЛЯ ЗАЩИТЫ ОТ DDOS АТАК.
